@@ -683,9 +683,6 @@ void DlgPrefWaveform::updateEnableUntilMark() {
     const bool enabled =
             pFactory->widgetTypeSupportsUntilMark() &&
             pFactory->getBackendFromConfig() != WaveformWidgetBackend::None;
-    
-    qWarning() << "pFactory->widgetTypeSupportsUntilMark()" << pFactory->widgetTypeSupportsUntilMark() << static_cast<int>(pFactory->getBackendFromConfig());         
-            
 #endif
     untilMarkShowBeatsCheckBox->setEnabled(enabled);
     untilMarkShowTimeCheckBox->setEnabled(enabled);
