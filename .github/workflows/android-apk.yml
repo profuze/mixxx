@@ -1,0 +1,164 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow
+
+# Builds the signed Mixxx Android APK (arm64-v8a, API 35) on a GitHub-hosted
+# Ubuntu 24.04 runner.
+#
+# Why a separate workflow?
+#   Upstream's .github/workflows/build.yml can only be started from another
+#   workflow (workflow_call) and always builds every platform (Linux, macOS,
+#   Windows, Android) at once.  This workflow runs only the Android job, using
+#   exactly the same steps and commands as upstream's "Android 15 arm64"
+#   matrix entry, so it also works on a fork without any repository secrets.
+#
+# The finished APK is attached to the workflow run as the artifact
+# "mixxx-android-apk", see android-build/README.md.
+name: Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build (branch, tag or commit SHA)"
+        required: false
+        default: ""
+        type: string
+  push:
+    branches:
+      - android-apk-build
+    paths:
+      - ".github/workflows/android-apk.yml"
+
+permissions:
+  contents: read
+
+env:
+  BUILDENV_BASEPATH: ${{ github.workspace }}/buildenv
+  CMAKE_ARGS: >-
+    -DBULK=ON
+    -DQT6=ON
+    -DQML=ON
+    -DHID=ON
+    -DVCPKG_TARGET_TRIPLET=arm64-android
+    -DVCPKG_DEFAULT_HOST_TRIPLET=x64-linux-release
+    -DCMAKE_SYSTEM_NAME=Android
+    -DBUILD_TESTING=OFF
+    -DBUILD_BENCH=OFF
+
+jobs:
+  android-apk:
+    name: Android 15 arm64 APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: "Check out repository"
+        uses: actions/checkout@v7
+        with:
+          # Required to make `git describe` work (Mixxx version information).
+          fetch-depth: 0
+          ref: ${{ inputs.ref != '' && inputs.ref || github.ref }}
+
+      - name: "Ensure that all tags are fetched"
+        run: git fetch origin --force --tags
+
+      # Remove unused pre-installed software, the Android build needs the disk
+      # space (the dependency build environment alone is several GB).
+      - name: "[android] Free up disk space"
+        run: |
+          sudo apt-get autoremove -y && sudo apt-get clean
+          sudo rm -rf /home/packer
+          sudo rm -rf /opt/az
+          sudo rm -rf /opt/google
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /opt/hostedtoolcache/go
+          sudo rm -rf /opt/hostedtoolcache/node
+          sudo rm -rf /opt/hostedtoolcache/PyPy
+          sudo rm -rf /opt/hostedtoolcache/Python
+          sudo rm -rf /opt/microsoft
+          sudo rm -rf /opt/pipx
+          sudo rm -rf /usr/lib/google-cloud-sdk
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/share/vcpkg
+          df -h /
+
+      - name: "[android] Setup signing key"
+        env:
+          ANDROID_SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
+          ANDROID_SIGNING_PASSWORD: ${{ secrets.ANDROID_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYSTORE_PATH="${GITHUB_WORKSPACE}/mixxx.keystore"
+          if [ -n "${ANDROID_SIGNING_KEYSTORE_BASE64:-}" ]; then
+            echo "${ANDROID_SIGNING_KEYSTORE_BASE64}" | base64 -d > "${KEYSTORE_PATH}"
+            KEYSTORE_PASSWORD="${ANDROID_SIGNING_PASSWORD}"
+          else
+            # No signing secret available (e.g. running on a fork): generate a
+            # temporary key so that the APK is signed and installable.
+            echo "::notice::ANDROID_SIGNING_KEYSTORE_BASE64 is not set - generating a temporary signing key."
+            keytool \
+              -genkey \
+              -keystore "${KEYSTORE_PATH}" \
+              -alias mixxx \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 365 \
+              -keypass mixxxandroid \
+              -storepass mixxxandroid \
+              -dname "CN=${GITHUB_ACTOR}"
+            KEYSTORE_PASSWORD="mixxxandroid"
+          fi
+          {
+            echo "QT_ANDROID_KEYSTORE_ALIAS=mixxx"
+            echo "QT_ANDROID_KEYSTORE_PATH=${KEYSTORE_PATH}"
+            echo "QT_ANDROID_KEYSTORE_KEY_PASS=${KEYSTORE_PASSWORD}"
+            echo "QT_ANDROID_KEYSTORE_STORE_PASS=${KEYSTORE_PASSWORD}"
+          } >> "${GITHUB_ENV}"
+          keytool -list -keystore "${KEYSTORE_PATH}" -storepass "${KEYSTORE_PASSWORD}"
+
+      # Installs JDK 17, Android SDK platform 35, build-tools 35.0.0 and
+      # NDK 27.2.12479018, and exports BUILDENV_URL/BUILDENV_SHA256,
+      # MIXXX_VCPKG_ROOT and VCPKG_TARGET_TRIPLET for the following steps.
+      - name: "Set up build environment"
+        run: ./tools/android_buildenv.sh setup
+
+      - name: "Show build environment"
+        run: |
+          echo "ANDROID_SDK=${ANDROID_SDK}"
+          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}"
+          echo "JAVA_HOME=${JAVA_HOME}"
+          echo "MIXXX_VCPKG_ROOT=${MIXXX_VCPKG_ROOT}"
+          echo "VCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET}"
+          echo "BUILDENV_NAME=${BUILDENV_NAME}"
+
+      - name: "Create build directory"
+        run: mkdir -p build
+
+      # Downloads and verifies the dependency build environment (several GB)
+      # here.
+      - name: "Configure"
+        working-directory: build
+        run: >
+          cmake
+          -DCMAKE_TOOLCHAIN_FILE="${MIXXX_VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+          ${CMAKE_ARGS}
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DDEBUG_ASSERTIONS_FATAL=OFF
+          ..
+
+      # The `apk` target is the only one that works reliably: targets such as
+      # mixxx-test are currently broken due to library conflicts (OpenMP).
+      - name: "Build APK"
+        working-directory: build
+        run: cmake --build . --target apk --parallel
+
+      - name: "Show built APK"
+        run: ls -la build/android-build/build/outputs/apk/release/
+
+      - name: "Upload APK"
+        uses: actions/upload-artifact@v7
+        with:
+          name: mixxx-android-apk
+          path: build/android-build/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
