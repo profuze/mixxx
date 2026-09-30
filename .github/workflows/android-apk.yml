@@ -6,9 +6,10 @@
 # Why a separate workflow?
 #   Upstream's .github/workflows/build.yml can only be started from another
 #   workflow (workflow_call) and always builds every platform (Linux, macOS,
-#   Windows, Android) at once.  This workflow runs only the Android job, using
-#   exactly the same steps and commands as upstream's "Android 15 arm64"
-#   matrix entry, so it also works on a fork without any repository secrets.
+#   Windows, Android) at once.  This workflow runs only the Android job with the
+#   same steps and cmake arguments as upstream's "Android 15 arm64" matrix
+#   entry (plus swap space and a low `--parallel` value, see the "Build APK"
+#   step), so it also works on a fork without any repository secrets.
 #
 # The finished APK is attached to the workflow run as the artifact
 # "mixxx-android-apk", see android-build/README.md.
@@ -134,6 +135,28 @@ jobs:
       - name: "Create build directory"
         run: mkdir -p build
 
+      # The standard GitHub-hosted runner has 16 GB RAM and (unlike a normal
+      # Linux box) no swap space at all.  Single Mixxx translation units such as
+      # soundmanager.cpp or metadatasourcetaglib.cpp need a couple of GB each
+      # when compiled with RelWithDebInfo, so a cold build with the default
+      # parallelism gets killed by the OOM killer (the job ends as "cancelled"
+      # with "The runner has received a shutdown signal" and every gmake child
+      # reporting "Terminated").  Add swap for headroom; the "Build APK" step
+      # below also keeps the parallelism low.
+      - name: "[android] Add swap space"
+        run: |
+          set -euo pipefail
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          if sudo swapon /swapfile; then
+            echo "::notice::8 GB swap enabled"
+          else
+            echo "::warning::Could not enable swap - the build may run out of memory."
+          fi
+          free -h
+          swapon --show
+
       # Downloads and verifies the dependency build environment (several GB)
       # here.
       - name: "Configure"
@@ -148,9 +171,14 @@ jobs:
 
       # The `apk` target is the only one that works reliably: targets such as
       # mixxx-test are currently broken due to library conflicts (OpenMP).
+      #
+      # Upstream's .github/workflows/build.yml builds without `--parallel`, i.e.
+      # one file at a time.  Two parallel jobs plus the swap space added above
+      # is the compromise used here: it roughly halves the build time without
+      # risking the memory exhaustion described in that step.
       - name: "Build APK"
         working-directory: build
-        run: cmake --build . --target apk --parallel
+        run: cmake --build . --target apk --parallel 2
 
       - name: "Show built APK"
         run: ls -la build/android-build/build/outputs/apk/release/
