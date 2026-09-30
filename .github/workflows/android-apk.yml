@@ -135,27 +135,28 @@ jobs:
       - name: "Create build directory"
         run: mkdir -p build
 
-      # The standard GitHub-hosted runner has 16 GB RAM and (unlike a normal
-      # Linux box) no swap space at all.  Single Mixxx translation units such as
-      # soundmanager.cpp or metadatasourcetaglib.cpp need a couple of GB each
-      # when compiled with RelWithDebInfo, so a cold build with the default
-      # parallelism gets killed by the OOM killer (the job ends as "cancelled"
-      # with "The runner has received a shutdown signal" and every gmake child
-      # reporting "Terminated").  Add swap for headroom; the "Build APK" step
-      # below also keeps the parallelism low.
+      # The standard GitHub-hosted runner has 16 GB RAM.  Single Mixxx
+      # translation units such as soundmanager.cpp or metadatasourcetaglib.cpp
+      # need a couple of GB each when compiled with RelWithDebInfo, so a cold
+      # build with the default parallelism gets killed by the OOM killer (the
+      # job ends as "cancelled" with "The runner has received a shutdown signal"
+      # while every gmake child reports "Terminated").  The runner image already
+      # ships a small /swapfile which is in use, so `fallocate /swapfile` fails
+      # with "Text file busy" - add an additional 8 GB next to it instead.  The
+      # "Build APK" step below also keeps the parallelism low.
       - name: "[android] Add swap space"
         run: |
-          set -euo pipefail
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          if sudo swapon /swapfile; then
-            echo "::notice::8 GB swap enabled"
+          echo "Memory before:"; free -h; sudo swapon --show || true
+          SWAPFILE=/home/runner/mixxx-swapfile
+          if sudo dd if=/dev/zero of="${SWAPFILE}" bs=1M count=8192 status=none \
+             && sudo chmod 600 "${SWAPFILE}" \
+             && sudo mkswap "${SWAPFILE}" \
+             && sudo swapon "${SWAPFILE}"; then
+            echo "::notice::Added 8 GB of swap space"
           else
-            echo "::warning::Could not enable swap - the build may run out of memory."
+            echo "::warning::Could not add swap space - the build may run out of memory."
           fi
-          free -h
-          swapon --show
+          echo "Memory after:"; free -h; sudo swapon --show || true
 
       # Downloads and verifies the dependency build environment (several GB)
       # here.
