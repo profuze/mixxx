@@ -1,0 +1,11 @@
+name: Sandbox Ping
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Ping
+        run: echo ping
